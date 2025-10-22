@@ -53,13 +53,13 @@ Function Get-VMGpuPartitionAdapterFriendlyName {
         }
 }
 
+"Obtaining list of compatible GPUs...May take a second"
 $PartGpuFN = @(Get-VMGpuPartitionAdapterFriendlyName)
 
 if (-not (Get-DesktopPC)) { $PartGpuFN = $PartGpuFN -like 'Intel*' }
 
 If (($PartGpuFN.Count -gt 0) -and (Get-WindowsCompatibleOS) -and (Get-HyperVEnabled)) {
-"System Compatible"
-"Printing a list of compatible GPUs...May take a second"
+"`r`nSystem Compatible"
 "Copy the name of the GPU you want to share..."
 Get-VMGpuPartitionAdapterFriendlyName
 Read-Host -Prompt "Press Enter to Exit"
