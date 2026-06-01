@@ -1,4 +1,4 @@
-﻿$params = @{
+$params = @{
     VMName = "GPUPV"
     SourcePath = "C:\Users\james\Downloads\Win11_English_x64.iso"
     Edition    = 6
@@ -17,6 +17,8 @@
     Username = "GPUVM"
     Password = "CoolestPassword!"
     Autologon = "true"
+    UpdateExisting = $false
+    PreserveGPUPartition = $false
 }
 
 Import-Module $PSSCriptRoot\Add-VMGpuPartitionAdapterFiles.psm1
@@ -102,6 +104,7 @@ else{
 Function Check-Params {
 
 $ExitReason = @()
+$isUpdateExisting = [bool]$params.UpdateExisting
 
 if ([ENVIRONMENT]::Is64BitProcess -eq $false) {
     $ExitReason += "You are not using the correct version of Powershell, do not use Powershell(x86)."
@@ -109,6 +112,52 @@ if ([ENVIRONMENT]::Is64BitProcess -eq $false) {
 if ((Is-Administrator) -eq $false) {
     $ExitReason += "Script not running as Administrator, please run script as Administrator."
     }
+if (($params.VMName -notmatch "^[a-zA-Z0-9]+$") -or ($params.VMName.Length -gt 15)) {
+    $ExitReason += "VMName cannot contain special characters, or be more than 15 characters long"
+    }
+if (([Environment]::OSVersion.Version.Build -lt 22000) -and ($params.GPUName -ne "AUTO")) {
+    $ExitReason += "GPUName must be set to AUTO on Windows 10."
+    }
+
+$PartitionableGPUList = Get-WmiObject -Class "Msvm_PartitionableGpu" -ComputerName $env:COMPUTERNAME -Namespace "ROOT\virtualization\v2" -ErrorAction SilentlyContinue
+if (-not $PartitionableGPUList) {
+    $ExitReason += "No partitionable GPU was detected on this host."
+    }
+elseif (($params.GPUName -ne "AUTO") -and (-not (Resolve-GPUInstancePath -GPUName $params.GPUName))) {
+    $ExitReason += "Could not resolve GPUName '$($params.GPUName)' to a partitionable GPU instance path."
+    }
+
+if ($isUpdateExisting) {
+    $existingVM = Get-VM -Name $params.VMName -ErrorAction SilentlyContinue
+    if (-not $existingVM) {
+        $ExitReason += "UpdateExisting is enabled, but VM '$($params.VMName)' does not exist."
+        }
+    else {
+        if ($existingVM.Generation -ne 2) {
+            $ExitReason += "VM '$($params.VMName)' must be Generation 2 for GPU-PV."
+            }
+
+        $checkpointList = Get-VMCheckpoint -VMName $params.VMName -ErrorAction SilentlyContinue
+        if ($checkpointList) {
+            $ExitReason += "VM '$($params.VMName)' has checkpoints. Merge or remove checkpoints before using update mode."
+            }
+
+        $vmDisks = Get-VMHardDiskDrive -VMName $params.VMName -ErrorAction SilentlyContinue
+        if (-not $vmDisks) {
+            $ExitReason += "VM '$($params.VMName)' has no attached virtual hard disk."
+            }
+        else {
+            $bootDisk = $vmDisks | Where-Object {$_.ControllerNumber -eq 0 -and $_.ControllerLocation -eq 0} | Select-Object -First 1
+            if (-not $bootDisk) {
+                $bootDisk = $vmDisks | Select-Object -First 1
+                }
+            if (-not $bootDisk.Path -or -not (Test-Path $bootDisk.Path)) {
+                $ExitReason += "Boot VHDX path '$($bootDisk.Path)' is inaccessible or missing."
+                }
+            }
+        }
+    }
+else {
 if (!(Test-Path $params.VHDPath)) {
     $ExitReason += "VHDPath Directory doesn't exist, please create it before running this script."
     }
@@ -128,11 +177,6 @@ if ($params.Username -eq $params.VMName ) {
 if (!($params.Username -match "^[a-zA-Z0-9]+$")) {
     $ExitReason += "Username cannot contain special characters."
     }
-if (($params.VMName -notmatch "^[a-zA-Z0-9]+$") -or ($params.VMName.Length -gt 15)) {
-    $ExitReason += "VMName cannot contain special characters, or be more than 15 characters long"
-    }
-if (([Environment]::OSVersion.Version.Build -lt 22000) -and ($params.GPUName -ne "AUTO")) {
-    $ExitReason += "GPUName must be set to AUTO on Windows 10."
     }
 If ($ExitReason.Count -gt 0) {
     Write-Host "Script failed params check due to the following reasons:" -ForegroundColor DarkYellow
@@ -4300,31 +4344,301 @@ param (
     $xml.Save("$UnattendPath")
 }
 
-function Assign-VMGPUPartitionAdapter {
+
+
+function Resolve-GPUInstancePath {
+param(
+[string]$GPUName
+)
+    $PartitionableGPUList = Get-WmiObject -Class "Msvm_PartitionableGpu" -ComputerName $env:COMPUTERNAME -Namespace "ROOT\virtualization\v2" -ErrorAction SilentlyContinue
+    if (-not $PartitionableGPUList) {
+        return $null
+        }
+    
+    if ($GPUName -eq "AUTO") {
+        return ($PartitionableGPUList | Select-Object -First 1).Name
+        }
+
+    $matchingDrivers = Get-WmiObject Win32_PNPSignedDriver | Where-Object {$_.Devicename -eq "$GPUName"}
+    foreach ($driver in $matchingDrivers) {
+        $hardwareIDs = @($driver.HardwareID)
+        foreach ($hardwareID in $hardwareIDs) {
+            if (-not $hardwareID) {
+                continue
+                }
+            $deviceID = ($hardwareID -split '\\')[1]
+            if (-not $deviceID) {
+                continue
+                }
+            $match = $PartitionableGPUList | Where-Object {$_.Name -like "*$deviceID*"} | Select-Object -First 1
+            if ($match) {
+                return $match.Name
+                }
+            }
+        }
+
+    return $null
+}
+
+Function Get-BootVHDPath {
+param(
+[string]$VMName
+)
+    $vmDisks = Get-VMHardDiskDrive -VMName $VMName -ErrorAction SilentlyContinue
+    if (-not $vmDisks) {
+        return $null
+        }
+    $bootDisk = $vmDisks | Where-Object {$_.ControllerNumber -eq 0 -and $_.ControllerLocation -eq 0} | Select-Object -First 1
+    if (-not $bootDisk) {
+        $bootDisk = $vmDisks | Select-Object -First 1
+        }
+    return $bootDisk.Path
+}
+
+Function Get-ExistingVMConfig {
+param(
+[string]$VMName
+)
+    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+    if (-not $vm) {
+        SmartExit -ExitReason "VM '$VMName' does not exist. Use create mode instead."
+        }
+
+    $vmMemory = Get-VMMemory -VMName $VMName
+    $vmProcessor = Get-VMProcessor -VMName $VMName
+    $gpuAdapters = @(Get-VMGpuPartitionAdapter -VMName $VMName -ErrorAction SilentlyContinue)
+    $networkAdapter = Get-VMNetworkAdapter -VMName $VMName -ErrorAction SilentlyContinue | Select-Object -First 1
+    $vhdPath = Get-BootVHDPath -VMName $VMName
+
+    [PSCustomObject]@{
+        State = $vm.State
+        ProcessorCount = $vm.ProcessorCount
+        MemoryStartup = $vm.MemoryStartup
+        AutomaticStopAction = $vm.AutomaticStopAction
+        CheckpointType = $vm.CheckpointType
+        DynamicMemoryEnabled = $vmMemory.DynamicMemoryEnabled
+        ExposeVirtualizationExtensions = $vmProcessor.ExposeVirtualizationExtensions
+        GpuPartitionAdapters = $gpuAdapters
+        VHDPath = $vhdPath
+        NetworkSwitch = if ($networkAdapter) {$networkAdapter.SwitchName} else {$null}
+    }
+}
+
+
+
+Function Update-VMConfiguration {
 param(
 [string]$VMName,
-[string]$GPUName,
-[decimal]$GPUResourceAllocationPercentage = 100
+[PSCustomObject]$CurrentConfig,
+[hashtable]$DesiredParams
 )
-    
-    $PartitionableGPUList = Get-WmiObject -Class "Msvm_PartitionableGpu" -ComputerName $env:COMPUTERNAME -Namespace "ROOT\virtualization\v2" 
-    if ($GPUName -eq "AUTO") {
-        $DevicePathName = $PartitionableGPUList.Name[0]
+    if ($CurrentConfig.ProcessorCount -ne $DesiredParams.CPUCores) {
+        Set-VMProcessor -VMName $VMName -Count $DesiredParams.CPUCores
+        }
+
+    if ([int64]$CurrentConfig.MemoryStartup -ne [int64]$DesiredParams.MemoryAmount) {
+        Set-VMMemory -VMName $VMName -StartupBytes $DesiredParams.MemoryAmount
+        }
+
+    if ($CurrentConfig.DynamicMemoryEnabled -ne $false) {
+        Set-VMMemory -VMName $VMName -DynamicMemoryEnabled $false
+        }
+
+    Set-VM -VMName $VMName -LowMemoryMappedIoSpace 3GB -HighMemoryMappedIoSpace 32GB -GuestControlledCacheTypes $true
+    Set-VM -VMName $VMName -AutomaticStopAction ShutDown
+
+    if ($CurrentConfig.CheckpointType -ne "Disabled") {
+        Set-VM -VMName $VMName -CheckpointType Disabled
+        }
+
+    if ($DesiredParams.NetworkSwitch) {
+        $currentSwitch = $CurrentConfig.NetworkSwitch
+        if ($currentSwitch -ne $DesiredParams.NetworkSwitch) {
+            Get-VMNetworkAdapter -VMName $VMName | Connect-VMNetworkAdapter -SwitchName $DesiredParams.NetworkSwitch
+            }
+        }
+
+    $isWin11 = [System.Environment]::OSVersion.Version.Build -ge 22000
+    $isAMD = (Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Manufacturer) -match "AMD|AuthenticAMD"
+    if ($isWin11 -or -not $isAMD) {
+        if (-not $CurrentConfig.ExposeVirtualizationExtensions) {
+            Set-VMProcessor -VMName $VMName -ExposeVirtualizationExtensions $true
+            }
+        }
+}
+
+Function Update-VMGPUPartition {
+param(
+[string]$VMName,
+[hashtable]$DesiredParams
+)
+    $existingAdapters = @(Get-VMGpuPartitionAdapter -VMName $VMName -ErrorAction SilentlyContinue)
+    $desiredInstancePath = Resolve-GPUInstancePath -GPUName $DesiredParams.GPUName
+    if (($DesiredParams.GPUName -ne "AUTO") -and (-not $desiredInstancePath)) {
+        SmartExit -ExitReason "Could not resolve GPU '$($DesiredParams.GPUName)' to a partitionable device instance path."
+        }
+
+    $shouldRecreateAdapter = $false
+    if ($existingAdapters.Count -eq 0) {
+        $shouldRecreateAdapter = $true
+        }
+    elseif ($existingAdapters.Count -gt 1) {
+        $shouldRecreateAdapter = $true
+        }
+    elseif ($DesiredParams.GPUName -ne "AUTO") {
+        $currentInstancePath = $existingAdapters[0].InstancePath
+        if ([string]::IsNullOrEmpty($currentInstancePath) -or ($currentInstancePath -ne $desiredInstancePath)) {
+            $shouldRecreateAdapter = $true
+            }
+        }
+
+    if ($shouldRecreateAdapter -and ($existingAdapters.Count -gt 0)) {
+        Remove-VMGpuPartitionAdapter -VMName $VMName
+        }
+
+    if ($shouldRecreateAdapter) {
+        if ($DesiredParams.GPUName -eq "AUTO") {
         Add-VMGpuPartitionAdapter -VMName $VMName
         }
     else {
-        $DeviceID = ((Get-WmiObject Win32_PNPSignedDriver | where {($_.Devicename -eq "$GPUNAME")}).hardwareid).split('\')[1]
-        $DevicePathName = ($PartitionableGPUList | Where-Object name -like "*$deviceid*").Name
-        Add-VMGpuPartitionAdapter -VMName $VMName -InstancePath $DevicePathName
+            Add-VMGpuPartitionAdapter -VMName $VMName -InstancePath $desiredInstancePath
+            }
         }
 
-    [float]$devider = [math]::round($(100 / $GPUResourceAllocationPercentage),2)
+    [float]$devider = [math]::round($(100 / $DesiredParams.GPUResourceAllocationPercentage),2)
+    if ($devider -le 0) {
+        SmartExit -ExitReason "GPUResourceAllocationPercentage must be greater than 0."
+        }
 
     Set-VMGpuPartitionAdapter -VMName $VMName -MinPartitionVRAM ([math]::round($(1000000000 / $devider))) -MaxPartitionVRAM ([math]::round($(1000000000 / $devider))) -OptimalPartitionVRAM ([math]::round($(1000000000 / $devider)))
     Set-VMGPUPartitionAdapter -VMName $VMName -MinPartitionEncode ([math]::round($(18446744073709551615 / $devider))) -MaxPartitionEncode ([math]::round($(18446744073709551615 / $devider))) -OptimalPartitionEncode ([math]::round($(18446744073709551615 / $devider)))
     Set-VMGpuPartitionAdapter -VMName $VMName -MinPartitionDecode ([math]::round($(1000000000 / $devider))) -MaxPartitionDecode ([math]::round($(1000000000 / $devider))) -OptimalPartitionDecode ([math]::round($(1000000000 / $devider)))
     Set-VMGpuPartitionAdapter -VMName $VMName -MinPartitionCompute ([math]::round($(1000000000 / $devider))) -MaxPartitionCompute ([math]::round($(1000000000 / $devider))) -OptimalPartitionCompute ([math]::round($(1000000000 / $devider)))
+}
 
+Function Update-VMGPUDriversOffline {
+param(
+[string]$VMName,
+[string]$GPUName,
+[string]$Hostname = $ENV:Computername
+)
+    $vhdPath = Get-BootVHDPath -VMName $VMName
+    if (-not $vhdPath -or -not (Test-Path $vhdPath)) {
+        SmartExit -ExitReason "Could not locate an accessible VHDX for VM '$VMName'."
+        }
+
+    $mountedDisk = $null
+    try {
+        Write-Host "INFO   : Mounting VHDX for offline GPU driver refresh"
+        $mountedDisk = Mount-VHD -Path $vhdPath -PassThru
+        $disk = $mountedDisk | Get-Disk
+        if ($disk.OperationalStatus -ne "Online") {
+            Set-Disk -Number $disk.Number -IsOffline $false
+            }
+        if ($disk.IsReadOnly) {
+            Set-Disk -Number $disk.Number -IsReadOnly $false
+            }
+
+        $osPartition = $disk | Get-Partition | Sort-Object Size -Descending | Where-Object {$_.Type -ne "Recovery" -and $_.Type -ne "System" -and $_.Type -ne "Reserved"} | Select-Object -First 1
+        if (-not $osPartition) {
+            throw "Unable to find OS partition in VHD '$vhdPath'."
+            }
+
+        $driveLetter = $osPartition.DriveLetter
+        if (-not $driveLetter -or $driveLetter -eq [char]0) {
+            $osPartition | Add-PartitionAccessPath -AssignDriveLetter
+            $osPartition = $osPartition | Get-Partition
+            $driveLetter = $osPartition.DriveLetter
+            }
+        if (-not $driveLetter -or $driveLetter -eq [char]0) {
+            throw "Unable to assign a drive letter to the OS partition in VHD '$vhdPath'."
+            }
+
+        $hostDriverStore = "$($driveLetter):\Windows\System32\HostDriverStore"
+        $hostDriverStoreBackup = "$($driveLetter):\Windows\System32\HostDriverStore.bak"
+
+        if (Test-Path $hostDriverStoreBackup) {
+            Remove-Item -Path $hostDriverStoreBackup -Recurse -Force
+            }
+        if (Test-Path $hostDriverStore) {
+            Move-Item -Path $hostDriverStore -Destination $hostDriverStoreBackup
+            }
+
+        New-Item -ItemType Directory -Path $hostDriverStore -Force | Out-Null
+
+        Write-Host "INFO   : Copying refreshed GPU driver files into VM VHDX"
+        Add-VMGpuPartitionAdapterFiles -hostname $Hostname -DriveLetter "$($driveLetter):" -GPUName $GPUName
+
+        if (Test-Path $hostDriverStoreBackup) {
+            Remove-Item -Path $hostDriverStoreBackup -Recurse -Force
+            }
+        }
+    catch {
+        SmartExit -ExitReason "Failed to update GPU drivers offline. $($_.Exception.Message)"
+        }
+    finally {
+        if ($mountedDisk) {
+            Dismount-VHD -Path $vhdPath
+            }
+        }
+}
+
+Function Update-GPUEnabledVM {
+param(
+[string]$VMName,
+[int64]$SizeBytes,
+[int]$Edition,
+[string]$VhdFormat,
+[string]$VhdPath,
+[string]$DiskLayout,
+[string]$UnattendPath,
+[int64]$MemoryAmount,
+[int]$CPUCores,
+[string]$NetworkSwitch,
+[string]$GPUName,
+[float]$GPUResourceAllocationPercentage,
+[string]$SourcePath,
+[string]$Team_ID,
+[string]$Key,
+[string]$username,
+[string]$password,
+[string]$autologon,
+[switch]$PreserveGPUPartition,
+[switch]$UpdateExisting
+)
+    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+    if (-not $vm) {
+        SmartExit -ExitReason "VM '$VMName' does not exist. Use create mode instead."
+        }
+
+    $checkpointList = Get-VMCheckpoint -VMName $VMName -ErrorAction SilentlyContinue
+    if ($checkpointList) {
+        $checkpointNames = ($checkpointList | Select-Object -ExpandProperty Name) -join ", "
+        SmartExit -ExitReason "VM '$VMName' has checkpoints ($checkpointNames). Merge or remove checkpoints before running update mode."
+        }
+
+    $currentConfig = Get-ExistingVMConfig -VMName $VMName
+    if ($currentConfig.State -ne "Off") {
+        SmartExit -ExitReason "Please stop the VM '$VMName' before running update mode."
+        }
+
+    $desiredParams = @{
+        CPUCores = $CPUCores
+        MemoryAmount = $MemoryAmount
+        NetworkSwitch = $NetworkSwitch
+        GPUName = $GPUName
+        GPUResourceAllocationPercentage = $GPUResourceAllocationPercentage
+    }
+
+    Update-VMConfiguration -VMName $VMName -CurrentConfig $currentConfig -DesiredParams $desiredParams
+
+    if (-not $PreserveGPUPartition) {
+        Update-VMGPUPartition -VMName $VMName -DesiredParams $desiredParams
+        }
+
+    Update-VMGPUDriversOffline -VMName $VMName -GPUName $GPUName
+
+    Write-Host "INFO   : VM '$VMName' has been updated successfully."
 }
 
 Function New-GPUEnabledVM {
@@ -4346,7 +4660,9 @@ param(
 [string]$Key,
 [string]$username,
 [string]$password,
-[string]$autologon
+[string]$autologon,
+[switch]$UpdateExisting,
+[switch]$PreserveGPUPartition
 )
     $VHDPath = ConcatenateVHDPath -VHDPath $VHDPath -VMName $VMName
     $DriveLetter = Mount-ISOReliable -SourcePath $SourcePath
@@ -4362,19 +4678,20 @@ param(
     Convert-WindowsImage -SourcePath $SourcePath -ISODriveLetter $DriveLetter -Edition $Edition -VHDFormat $Vhdformat -VHDPath $VhdPath -DiskLayout $DiskLayout -UnattendPath $UnattendPath -GPUName $GPUName -Team_ID $Team_ID -Key $Key -SizeBytes $SizeBytes| Out-Null
     if (Test-Path $vhdPath) {
         New-VM -Name $VMName -MemoryStartupBytes $MemoryAmount -VHDPath $VhdPath -Generation 2 -SwitchName $NetworkSwitch -Version $MaxAvailableVersion | Out-Null
-        Set-VM -Name $VMName -ProcessorCount $CPUCores -CheckpointType Disabled -LowMemoryMappedIoSpace 3GB -HighMemoryMappedIoSpace 32GB -GuestControlledCacheTypes $true -AutomaticStopAction ShutDown
-        Set-VMMemory -VMName $VMName -DynamicMemoryEnabled $false 
-        $CPUManufacturer = Get-CimInstance -ClassName Win32_Processor | Foreach-Object Manufacturer
-        $BuildVer = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-        if (($BuildVer.CurrentBuild -lt 22000) -and ($CPUManufacturer -eq "AuthenticAMD")) {
-            }
-        Else {
-            Set-VMProcessor -VMName $VMName -ExposeVirtualizationExtensions $true
-            }
         Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector
         Enable-VMTPM -VMName $VMName 
         Add-VMDvdDrive -VMName $VMName -Path $SourcePath
-        Assign-VMGPUPartitionAdapter -GPUName $GPUName -VMName $VMName -GPUResourceAllocationPercentage $GPUResourceAllocationPercentage
+        
+        $currentConfig = Get-ExistingVMConfig -VMName $VMName
+        $desiredParams = @{
+            CPUCores = $CPUCores
+            MemoryAmount = $MemoryAmount
+            NetworkSwitch = $NetworkSwitch
+            GPUName = $GPUName
+            GPUResourceAllocationPercentage = $GPUResourceAllocationPercentage
+        }
+        Update-VMConfiguration -VMName $VMName -CurrentConfig $currentConfig -DesiredParams $desiredParams
+        Update-VMGPUPartition -VMName $VMName -DesiredParams $desiredParams
         Write-Host "INFO   : Starting and connecting to VM"
         vmconnect localhost $VMName
         }
@@ -4385,11 +4702,17 @@ param(
 
 Check-Params @params
 
-New-GPUEnabledVM @params
+if ($params.UpdateExisting) {
+    Update-GPUEnabledVM @params
+    SmartExit -NoHalt -ExitReason "Update mode completed for VM '$($params.VMName)'."
+    }
+else {
+    New-GPUEnabledVM @params
 
-Start-VM -Name $params.VMName
+    Start-VM -Name $params.VMName
 
-SmartExit -ExitReason "If all went well the Virtual Machine will have started, 
+    SmartExit -ExitReason "If all went well the Virtual Machine will have started, 
 In a few minutes it will load the Windows desktop, 
 when it does, install your favorite high performance remote desktop! " 
+    } 
 
