@@ -15,7 +15,7 @@ Function Get-DesktopPC
 
 Function Get-WindowsCompatibleOS {
 $build = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-if ($build.CurrentBuild -ge 19041 -and ($($build.editionid -like 'Professional*') -or $($build.editionid -like 'Enterprise*') -or $($build.editionid -like 'Education*'))) {
+if ($build.CurrentBuild -ge 19041 -and ($($build.editionid -like 'Professional*') -or $($build.editionid -like '*Enterprise*') -or $($build.editionid -like 'Education*'))) {
     Return $true
     }
 Else {
