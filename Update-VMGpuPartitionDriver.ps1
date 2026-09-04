@@ -35,14 +35,30 @@ While ($VM.State -ne "Off") {
     "Waiting for VM to shutdown - make sure there are no unsaved documents..."
     }
 
-"Mounting Drive..."
-$DriveLetter = (Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter -and $_.FileSystem -eq "NTFS"} | Sort-Object Size -Descending | Select-Object -First 1 -ExpandProperty DriveLetter)
+"Mounting Drive(s)..."
+$DriveLetter = $null
+$OSVHDPath = $null
+foreach ($v in $VHD) {
+    $mounted = Mount-VHD -Path $v.Path -PassThru
+    $osVolume = $mounted | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter -and (Test-Path "$($_.DriveLetter):\Windows\System32\ntoskrnl.exe")}
+    if ($osVolume) {
+        $DriveLetter = $osVolume.DriveLetter
+        $OSVHDPath = $v.Path
+        }
+    else {
+        Dismount-VHD -Path $v.Path
+        }
+    }
+
+if (-not $DriveLetter) {
+    Throw "Could not find the VM's Windows OS volume among its attached VHDs."
+    }
 
 "Copying GPU Files - this could take a while..."
 Add-VMGPUPartitionAdapterFiles -hostname $Hostname -DriveLetter $DriveLetter -GPUName $GPUName
 
 "Dismounting Drive..."
-Dismount-VHD -Path $VHD.Path
+Dismount-VHD -Path $OSVHDPath
 
 If ($state_was_running){
     "Previous State was running so starting VM..."
