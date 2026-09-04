@@ -5,7 +5,7 @@ Function Get-DesktopPC
  $isDesktop = $true
  if(Get-WmiObject -Class win32_systemenclosure | Where-Object { $_.chassistypes -eq 9 -or $_.chassistypes -eq 10 -or $_.chassistypes -eq 14})
    {
-   Write-Warning "Computer is a laptop. Laptop dedicated GPU's that are partitioned and assigned to VM may not work with Parsec." 
+   Write-Warning "Computer is a laptop. Laptop dedicated GPU's that are partitioned and assigned to VM may not work with GPU based remote desktop apps." 
    Write-Warning "Thunderbolt 3 or 4 dock based GPU's may work"
    $isDesktop = $false }
  if (Get-WmiObject -Class win32_battery)
