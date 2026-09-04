@@ -36,7 +36,7 @@ While ($VM.State -ne "Off") {
     }
 
 "Mounting Drive..."
-$DriveLetter = (Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter} | ForEach-Object DriveLetter)
+$DriveLetter = (Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter -and $_.FileSystem -eq "NTFS"} | Sort-Object Size -Descending | Select-Object -First 1 -ExpandProperty DriveLetter)
 
 "Copying GPU Files - this could take a while..."
 Add-VMGPUPartitionAdapterFiles -hostname $Hostname -DriveLetter $DriveLetter -GPUName $GPUName
