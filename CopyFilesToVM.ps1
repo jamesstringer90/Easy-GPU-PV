@@ -1,5 +1,6 @@
 ﻿$params = @{
     VMName = "GPUPV"
+    pisoPath = "C:\Program Files\PowerISO\piso.exe"
     SourcePath = "C:\Users\james\Downloads\Win11_English_x64.iso"
     Edition    = 6
     VhdFormat  = "VHDX"
@@ -27,40 +28,41 @@ function Is-Administrator
     (New-Object Security.Principal.WindowsPrincipal $CurrentUser).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)  
 }
 
-Function Dismount-ISO {
+
+Function PowerISO-Mount-ISO {
 param (
 [string]$SourcePath
 )
-$disk = Get-Volume | Where-Object {$_.DriveType -eq "CD-ROM"} | select *
-Foreach ($d in $disk) {
-    Dismount-DiskImage -ImagePath $sourcePath | Out-Null
+    #PowerISO command line docs: https://poweriso.com/tutorials/command-line-argus.htm
+    #We will use Power ISO exclusively, and we will use only 1 virtual drive (Not strictly necessary, just to keep script simple and fast)
+    Start-Process -NoNewWindow -FilePath $params.pisoPath -ArgumentList "unmount all"
+    Start-Process -NoNewWindow -FilePath $params.pisoPath -ArgumentList "setvdnum 1"
+
+    $pisoPath=$params.pisoPath
+    $listvdOutput = & "$pisoPath" "listvd"
+    # Find the first drive that is free (contains "<No media>")
+    $freeDrive = $null
+    foreach ($line in $listvdOutput) {
+        if ($line -match "Drive \[([A-Z]):\] <No media>") {
+            $freeDrive = $matches[1]
+        }
+    }
+
+    if (-not $freeDrive) {
+        return
+    }
+
+    # Mount the ISO to the free drive
+    $mountCommand = & "$pisoPath" mount "$SourcePath" "${freeDrive}:"
+    if ($mountCommand -like "*successfully*") {
+        Write-Output "${freeDrive}"
+    } else {
+        Write-Output "Failed to mount the ISO."
     }
 }
 
-Function Mount-ISOReliable {
-param (
-[string]$SourcePath
-)
-$mountResult = Mount-DiskImage -ImagePath $SourcePath
-$delay = 0
-Do {
-    if ($delay -gt 15) {
-        Function Get-NewDriveLetter {
-            $UsedDriveLetters = ((Get-Volume).DriveLetter) -join ""
-             Do {
-                $DriveLetter = (65..90)| Get-Random | % {[char]$_}
-                }
-            Until (!$UsedDriveLetters.Contains("$DriveLetter"))
-            $DriveLetter
-            }
-        $DriveLetter = "$(Get-NewDriveLetter)" +  ":"
-        Get-WmiObject -Class Win32_volume | Where-Object {$_.Label -eq "CCCOMA_X64FRE_EN-US_DV9"} | Set-WmiInstance -Arguments @{DriveLetter="$driveletter"}
-        }
-    Start-Sleep -s 1 
-    $delay++
-    }
-Until (($mountResult | Get-Volume).DriveLetter -ne $NULL)
-($mountResult | Get-Volume).DriveLetter
+Function Dismount-ISO {
+Start-Process -NoNewWindow -FilePath $params.pisoPath -ArgumentList "unmount all"
 }
 
 
@@ -116,11 +118,11 @@ if (!(test-path $params.SourcePath)) {
     $ExitReason += "ISO Path Invalid. Please enter a valid ISO Path in the SourcePath section of Params."
     }
 else {
-    $ISODriveLetter = Mount-ISOReliable -SourcePath $params.SourcePath
+    $ISODriveLetter = PowerISO-Mount-ISO -SourcePath $params.SourcePath
     if (!(Test-Path $("$ISODriveLetter"+":\Sources\install.wim"))) {
         $ExitReason += "This ISO is invalid, please check readme for ISO downloading instructions."
         }
-    Dismount-ISO -SourcePath $params.SourcePath 
+    Dismount-ISO
     }
 if ($params.Username -eq $params.VMName ) {
     $ExitReason += "Username cannot be the same as VMName."
@@ -2614,7 +2616,7 @@ You can use the fields below to configure the VHD or VHDX that you want to creat
             }
 
             # Close out the transcript and tell the user we're done.
-            Dismount-ISO -SourcePath $ISOPath
+            Dismount-ISO
             Write-W2VInfo "Done."
             if ($transcripting)
             {
@@ -4349,7 +4351,7 @@ param(
 [string]$autologon
 )
     $VHDPath = ConcatenateVHDPath -VHDPath $VHDPath -VMName $VMName
-    $DriveLetter = Mount-ISOReliable -SourcePath $SourcePath
+    $DriveLetter = PowerISO-Mount-ISO -SourcePath $params.SourcePath
 
     if ($(Get-VM -Name $VMName -ErrorAction SilentlyContinue) -ne $NULL) {
         SmartExit -ExitReason "Virtual Machine already exists with name $VMName, please delete existing VM or change VMName"
