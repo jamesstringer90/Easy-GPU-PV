@@ -7,7 +7,7 @@ App Sandbox includes everything you need to create a VM, just bring your Windows
 
 It's also fully open source with an MIT license  
 
-[Download it here](https://github.com/jamesstringer90/appsandbox/releases/download/v0.1.0/AppSandbox-0.1.0-x64.zip)
+[Download it here](https://github.com/jamesstringer90/appsandbox/releases)
 
 <img width="1028" height="446" alt="image" src="https://github.com/user-attachments/assets/2b341bb3-e2de-456b-b8e8-a0b037099b62" />
 
