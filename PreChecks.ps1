@@ -5,7 +5,7 @@ Function Get-DesktopPC
  $isDesktop = $true
  if(Get-WmiObject -Class win32_systemenclosure | Where-Object { $_.chassistypes -eq 9 -or $_.chassistypes -eq 10 -or $_.chassistypes -eq 14})
    {
-   Write-Warning "Computer is a laptop. Laptop dedicated GPU's that are partitioned and assigned to VM may not work with GPU based remote desktop apps." 
+   Write-Warning "Computer is a laptop. Laptop dedicated GPU's that are partitioned and assigned to VM may not work with GPU based remote desktop apps."
    Write-Warning "Thunderbolt 3 or 4 dock based GPU's may work"
    $isDesktop = $false }
  if (Get-WmiObject -Class win32_battery)
@@ -53,9 +53,13 @@ Function Get-VMGpuPartitionAdapterFriendlyName {
         }
 }
 
-If ((Get-DesktopPC) -and  (Get-WindowsCompatibleOS) -and (Get-HyperVEnabled)) {
-"System Compatible"
-"Printing a list of compatible GPUs...May take a second"
+"Obtaining list of compatible GPUs...May take a second"
+$PartGpuFN = @(Get-VMGpuPartitionAdapterFriendlyName)
+
+if (-not (Get-DesktopPC)) { $PartGpuFN = $PartGpuFN -like 'Intel*' }
+
+If (($PartGpuFN.Count -gt 0) -and (Get-WindowsCompatibleOS) -and (Get-HyperVEnabled)) {
+"`r`nSystem Compatible"
 "Copy the name of the GPU you want to share..."
 Get-VMGpuPartitionAdapterFriendlyName
 Read-Host -Prompt "Press Enter to Exit"
