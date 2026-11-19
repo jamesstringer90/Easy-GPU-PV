@@ -35,14 +35,19 @@ While ($VM.State -ne "Off") {
     "Waiting for VM to shutdown - make sure there are no unsaved documents..."
     }
 
+if ($VHD -is [array]) {
+    $DiskPath = $VHD.Path[0]
+} else {
+    $DiskPath = $VHD.Path
+}
 "Mounting Drive..."
-$DriveLetter = (Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter} | ForEach-Object DriveLetter)
+$DriveLetter = (Mount-VHD -Path $DiskPath -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter} | ForEach-Object DriveLetter)
 
 "Copying GPU Files - this could take a while..."
 Add-VMGPUPartitionAdapterFiles -hostname $Hostname -DriveLetter $DriveLetter -GPUName $GPUName
 
 "Dismounting Drive..."
-Dismount-VHD -Path $VHD.Path
+Dismount-VHD -Path $DiskPath
 
 If ($state_was_running){
     "Previous State was running so starting VM..."
