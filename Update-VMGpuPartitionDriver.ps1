@@ -36,7 +36,17 @@ While ($VM.State -ne "Off") {
     }
 
 "Mounting Drive..."
-$DriveLetter = (Mount-VHD -Path $VHD.Path -PassThru | Get-Disk | Get-Partition | Get-Volume | Where-Object {$_.DriveLetter} | ForEach-Object DriveLetter)
+    $mnt = Mount-VHD -Path $VHD.Path -PassThru
+    Start-Sleep -Seconds 3
+    $disk = $mnt | Get-Disk
+    if ($disk.IsOffline) { Set-Disk -Number $disk.Number -IsOffline $false }
+    $part = $disk | Get-Partition | Sort-Object Size -Descending | Select-Object -First 1
+    if ($part.DriveLetter -notmatch '^[A-Z]$') {
+        $part | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue | Out-Null
+        Start-Sleep -Seconds 3
+        $part = $disk | Get-Partition | Sort-Object Size -Descending | Select-Object -First 1
+    }
+    $DriveLetter = "$($part.DriveLetter):"
 
 "Copying GPU Files - this could take a while..."
 Add-VMGPUPartitionAdapterFiles -hostname $Hostname -DriveLetter $DriveLetter -GPUName $GPUName
