@@ -84,3 +84,4 @@ It's important to update the VM GPU Drivers after you have updated the Host GPUs
 - If you do not have administrator permissions on the machine it means you set the username and vmname to the same thing, these needs to be different.  
 - AMD Polaris GPUS like the RX 580 do not support hardware video encoding via GPU Paravirtualization at this time.  
 - To download Windows ISOs with Rufus, it must have "Check for updates" enabled.
+If you are using a Traditional Chinese ISO and the script shows "沒有合適的映像。" when creating the VHDX, set the edition to 3 in the params section
